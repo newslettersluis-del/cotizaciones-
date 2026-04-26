@@ -699,13 +699,107 @@ function parseFecha(str) {
   return dt;
 }
 
+// Layout per template: which rows hold the pre-formatted item area. If a
+// petition has more items than (itemsEnd - itemsStart + 1), we extend the
+// area and update the SUM/range formulas in the totals block.
+const TEMPLATE_LAYOUTS = {
+  LUIS_CARLOS: { itemsStart: 11, itemsEnd: 26 },
+  LUCA:        { itemsStart: 11, itemsEnd: 36 },
+};
+
+// Copy a row's full formatting + per-item formulas from srcRow to dstRow.
+// References to srcRow inside formulas (e.g. H26 in =H26*B26) get rewritten
+// to dstRow so each new row's formulas reference its own cells.
+function copyRowFormatAndFormulas(ws, srcRow, dstRow) {
+  const clone = (o) => o == null ? o : JSON.parse(JSON.stringify(o));
+  const src = ws.getRow(srcRow);
+  src.eachCell({ includeEmpty: true }, (srcCell, col) => {
+    const dstCell = ws.getCell(dstRow, col);
+    if (srcCell.numFmt)    dstCell.numFmt    = srcCell.numFmt;
+    if (srcCell.font)      dstCell.font      = clone(srcCell.font);
+    if (srcCell.alignment) dstCell.alignment = clone(srcCell.alignment);
+    if (srcCell.border)    dstCell.border    = clone(srcCell.border);
+    if (srcCell.fill)      dstCell.fill      = clone(srcCell.fill);
+    if (srcCell.formula) {
+      const adj = srcCell.formula.replace(
+        new RegExp("(\\$?[A-Z]+\\$?)" + srcRow + "\\b", "g"),
+        "$1" + dstRow
+      );
+      dstCell.value = { formula: adj };
+    }
+  });
+}
+
+// If the petition has more items than the pre-formatted area, insert extra
+// rows after itemsEnd (pushing the totals block down), copy format + formulas
+// onto the new rows, and rewrite formula references in shifted cells.
+function extendTemplateForItems(ws, layout, itemCount) {
+  const preCount = layout.itemsEnd - layout.itemsStart + 1;
+  const extra = Math.max(0, itemCount - preCount);
+  if (extra <= 0) return;
+
+  const splicePoint = layout.itemsEnd + 1;
+  const sourceRow   = layout.itemsEnd;
+  const newItemsEnd = layout.itemsEnd + extra;
+
+  // 1. Insert empty rows at splicePoint (existing rows shift down by `extra`).
+  const emptyRows = [];
+  for (let i = 0; i < extra; i++) emptyRows.push([]);
+  ws.spliceRows(splicePoint, 0, ...emptyRows);
+
+  // 2. Walk every formula and shift any row reference that pointed to a row
+  //    >= splicePoint by +extra (since those cells moved down).
+  ws.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      if (!cell.formula) return;
+      const adjusted = cell.formula.replace(
+        /(\$?[A-Z]+\$?)(\d+)/g,
+        (full, colPart, rowStr) => {
+          const r = parseInt(rowStr, 10);
+          return r >= splicePoint ? colPart + (r + extra) : full;
+        }
+      );
+      if (adjusted !== cell.formula) cell.value = { formula: adjusted };
+    });
+  });
+
+  // 3. Extend ranges that covered the items area (e.g. SUM(I11:I26) →
+  //    SUM(I11:I31)). Uses a named capture group to avoid \1 + digits being
+  //    parsed as an octal escape.
+  const rangeRe = new RegExp(
+    "(?<col>\\$?[A-Z]+\\$?)" + layout.itemsStart + ":\\k<col>" + layout.itemsEnd + "\\b",
+    "g"
+  );
+  ws.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      if (!cell.formula) return;
+      const adjusted = cell.formula.replace(
+        rangeRe,
+        "$<col>" + layout.itemsStart + ":$<col>" + newItemsEnd
+      );
+      if (adjusted !== cell.formula) cell.value = { formula: adjusted };
+    });
+  });
+
+  // 4. Populate the inserted empty rows with format + formulas from sourceRow.
+  for (let i = 0; i < extra; i++) {
+    const dstRow = layout.itemsEnd + 1 + i;
+    copyRowFormatAndFormulas(ws, sourceRow, dstRow);
+  }
+}
+
 async function buildExcelForPetition(pet) {
   // Pick the template based on the company detected from the Word.
   const tplCfg = TEMPLATES[pet.companyKey] || TEMPLATES.LUIS_CARLOS;
+  const layout = TEMPLATE_LAYOUTS[pet.companyKey] || TEMPLATE_LAYOUTS.LUIS_CARLOS;
   const templateBuf = base64ToArrayBuffer(tplCfg.b64);
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(templateBuf);
   const ws = wb.worksheets[0];
+
+  // Si hay más items que filas pre-formateadas en el template, extendemos el
+  // área de items copiando el formato + fórmulas y reubicamos los totales.
+  extendTemplateForItems(ws, layout, pet.items.length);
 
   // C9 = elaboro name
   ws.getCell("C9").value = pet.elaboro || "";
