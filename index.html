@@ -569,10 +569,10 @@ function parseHeaderParagraph(text) {
   const norm = text.replace(/\r/g, "").trim();
   const lines = norm.split(/\n/).map(l => l.trim()).filter(Boolean);
 
-  // 3-line format: company, "Cot <num>", elaborador
-  if (lines.length >= 2 && /^Cot\s+\d{4,}\s*$/.test(lines[1])) {
+  // 3-line format: company, "Cot <num>" (con o sin punto), elaborador
+  if (lines.length >= 2 && /^Cot\.?\s+\d{4,}\s*$/.test(lines[1])) {
     const company = lines[0];
-    const petMatch = lines[1].match(/^Cot\s+(\d{4,})\s*$/);
+    const petMatch = lines[1].match(/^Cot\.?\s+(\d{4,})\s*$/);
     const elaborador = (lines[2] || "").trim();
     return {
       company,
@@ -583,8 +583,8 @@ function parseHeaderParagraph(text) {
   }
 
   // 2-line format: "Cot <num>", elaborador (old Word format) — no company line
-  if (lines.length >= 1 && /^Cot\s+\d{4,}\s*$/.test(lines[0])) {
-    const petMatch = lines[0].match(/^Cot\s+(\d{4,})\s*$/);
+  if (lines.length >= 1 && /^Cot\.?\s+\d{4,}\s*$/.test(lines[0])) {
+    const petMatch = lines[0].match(/^Cot\.?\s+(\d{4,})\s*$/);
     const elaborador = (lines[1] || "").trim();
     return {
       company: "",
@@ -595,7 +595,7 @@ function parseHeaderParagraph(text) {
   }
 
   // Single-line: "Cot <num> <name>"
-  const m = norm.match(/^Cot\s+(\d{4,})\s+(.+?)\s*$/);
+  const m = norm.match(/^Cot\.?\s+(\d{4,})\s+(.+?)\s*$/);
   if (m) {
     return {
       company: "",
@@ -606,7 +606,7 @@ function parseHeaderParagraph(text) {
   }
 
   // Just a number
-  const m2 = norm.match(/^Cot\s+(\d{4,})\s*$/);
+  const m2 = norm.match(/^Cot\.?\s+(\d{4,})\s*$/);
   if (m2) {
     return {
       company: "",
@@ -623,7 +623,7 @@ function parseHeaderParagraph(text) {
 // just prose (intro/outro text in the Word) and skip.
 function isLikelyHeaderParagraph(text) {
   if (!text) return false;
-  return /(^|\n)\s*Cot\s+\d{4,}\s*($|\n)/.test(text.replace(/\r/g, ""));
+  return /(^|\n)\s*Cot\.?\s+\d{4,}\s*($|\n)/.test(text.replace(/\r/g, ""));
 }
 
 async function parseDocx(file, fileId) {
