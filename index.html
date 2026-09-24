@@ -626,6 +626,42 @@ function isLikelyHeaderParagraph(text) {
   return /(^|\n)\s*Cot\.?\s+\d{4,}\s*($|\n)/.test(text.replace(/\r/g, ""));
 }
 
+// Real-world Words write company / "Cot <num>" / elaborador as THREE
+// SEPARATE <w:p> paragraphs (not one paragraph with <w:br/> line breaks).
+// When a paragraph is standalone "Cot <num>", pull the company name from the
+// nearest previous non-empty paragraph and the elaborador from the nearest
+// next non-empty paragraph, stopping at table boundaries or other headers.
+function resolveHeaderFromNeighborParagraphs(blocks, idx) {
+  const text = (blocks[idx].text || "").trim();
+  const m = text.match(/^Cot\.?\s+(\d{4,})\s*$/);
+  if (!m) return null;
+
+  let company = "";
+  for (let j = idx - 1; j >= 0; j--) {
+    if (blocks[j].type !== "p") break; // hit a table — previous petition's area
+    const t = (blocks[j].text || "").trim();
+    if (!t) continue; // skip blank paragraphs
+    if (!isLikelyHeaderParagraph(t)) company = t;
+    break;
+  }
+
+  let elaborador = "";
+  for (let j = idx + 1; j < blocks.length; j++) {
+    if (blocks[j].type !== "p") break;
+    const t = (blocks[j].text || "").trim();
+    if (!t) continue;
+    if (!isLikelyHeaderParagraph(t)) elaborador = t;
+    break;
+  }
+
+  return {
+    company,
+    companyKey: detectCompanyKey(company),
+    petitionNo: m[1],
+    elaboro: elaborador,
+  };
+}
+
 async function parseDocx(file, fileId) {
   const buf = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(buf);
@@ -645,7 +681,11 @@ async function parseDocx(file, fileId) {
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
     if (b.type !== "p") continue;
-    const head = parseHeaderParagraph(b.text);
+    // Try the real-world "3 separate paragraphs" layout first — it only
+    // matches a standalone "Cot <num>" paragraph, so it won't misfire on
+    // merged multi-line paragraphs. Fall back to the single-paragraph
+    // formats (old Words that use <w:br/> line breaks) otherwise.
+    const head = resolveHeaderFromNeighborParagraphs(blocks, i) || parseHeaderParagraph(b.text);
     if (!head) continue;
 
     // Look ahead for the next table (allow intervening empty paragraphs).
