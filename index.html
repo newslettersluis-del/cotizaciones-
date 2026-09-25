@@ -757,9 +757,15 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
-    // Excel Table definition parts ExcelJS corrupts on write and that must
-    // be restored from the original template bytes — see fillTableLayout.
-    tableParts: ["xl/tables/table1.xml"],
+    // Parts ExcelJS corrupts when it rewrites the workbook (Table column
+    // definitions, and picture position/size/crop for the two logo images)
+    // that must be restored verbatim from the original template bytes
+    // after wb.xlsx.writeBuffer() — see fillTableLayout / restoreOriginalTableParts.
+    restoreParts: [
+      "xl/tables/table1.xml",
+      "xl/drawings/drawing1.xml",
+      "xl/drawings/drawing2.xml",
+    ],
   },
   LUCA: { mode: "legacy", itemsStart: 11, itemsEnd: 36 },
 };
@@ -992,16 +998,18 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
   // rewrites the workbook it regenerates xl/tables/table1.xml from its own
   // (incomplete) internal model, collapsing all 15 "Partidas" columns down
   // to 1 and mangling totalsRowShown/headerRowCount — Excel then flags the
-  // file as corrupt on open. The cell DATA writes fine; only this one XML
-  // part is broken. Fix: after ExcelJS writes, swap that one part back in
-  // from the original (pristine, un-rewritten) template bytes.
-  return restoreOriginalTableParts(outBuf, templateBuf, layout.tableParts);
+  // file as corrupt on open. ExcelJS also drops each logo picture's size/
+  // position (<a:xfrm>) and crop (<a:srcRect>) on write, making the logos
+  // render oversized/overlapping text. Cell DATA writes fine in all cases;
+  // only these specific XML parts are broken. Fix: after ExcelJS writes,
+  // swap those parts back in from the original (pristine) template bytes.
+  return restoreOriginalTableParts(outBuf, templateBuf, layout.restoreParts);
 }
 
 // Replace one or more zip entries in `outBuf` with their original bytes
 // from `templateBuf`, to undo ExcelJS write corruption on specific parts
-// (currently: Excel Table definitions) without touching anything else
-// ExcelJS wrote correctly (cell values, formulas, styles, etc).
+// (Excel Table definitions, logo picture position/crop) without touching
+// anything else ExcelJS wrote correctly (cell values, formulas, styles, etc).
 async function restoreOriginalTableParts(outBuf, templateBuf, paths) {
   if (!paths || !paths.length) return outBuf;
   const [outZip, tplZip] = await Promise.all([
