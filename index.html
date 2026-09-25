@@ -554,6 +554,25 @@ function itemsFromTableRows(rows) {
   return items;
 }
 
+// Algunos Words más nuevos anteponen una etiqueta antes de cada dato del
+// encabezado, ej.:
+//     Nombre de la empresa: MAQUINARIAS Y EQUIPO LUCA, S.A DE C.V.
+//     Petición: Cot 496759
+//     Elaboró: Adrian Martinez Reyes
+// en vez del formato "pelón" (sin etiqueta) que ya soportábamos. Estas
+// funciones quitan la etiqueta si está presente y dejan el valor tal cual si
+// no lo está, para que ambos formatos funcionen con la misma lógica de abajo.
+function stripPetitionLabel(line) {
+  return (line || "").replace(/^(?:petici[oó]n|pedido|solicitud|cotizaci[oó]n)\s*:\s*/i, "").trim();
+}
+function stripCompanyLabel(line) {
+  return (line || "").replace(/^(?:nombre\s+de\s+la\s+empresa|empresa|cliente)\s*:\s*/i, "").trim();
+}
+function stripElaboradorLabel(line) {
+  return (line || "").replace(/^(?:elabor[oó]|elaborador(?:a)?|elaborado\s+por|prepar[oó]|atendi[oó])\s*:\s*/i, "").trim();
+}
+const COT_LINE_RE = /^Cot\.?\s+(\d{4,})\s*$/;
+
 // Parse the header paragraph. Two formats supported:
 //   Nuevo (3 líneas):
 //     <EMPRESA>
@@ -563,17 +582,19 @@ function itemsFromTableRows(rows) {
 //     Cot <num>
 //     <Elaborador>
 // También acepta "Cot <num> <name>" en una sola línea. Si no detecta empresa
-// en la primera línea, usa el default (Luis Carlos).
+// en la primera línea, usa el default (Luis Carlos). Cada línea puede venir
+// con o sin su etiqueta ("Petición:", "Nombre de la empresa:", "Elaboró:").
 function parseHeaderParagraph(text) {
   if (!text) return null;
   const norm = text.replace(/\r/g, "").trim();
   const lines = norm.split(/\n/).map(l => l.trim()).filter(Boolean);
 
   // 3-line format: company, "Cot <num>" (con o sin punto), elaborador
-  if (lines.length >= 2 && /^Cot\.?\s+\d{4,}\s*$/.test(lines[1])) {
-    const company = lines[0];
-    const petMatch = lines[1].match(/^Cot\.?\s+(\d{4,})\s*$/);
-    const elaborador = (lines[2] || "").trim();
+  const line1Stripped = stripPetitionLabel(lines[1] || "");
+  if (lines.length >= 2 && COT_LINE_RE.test(line1Stripped)) {
+    const company = stripCompanyLabel(lines[0]);
+    const petMatch = line1Stripped.match(COT_LINE_RE);
+    const elaborador = stripElaboradorLabel(lines[2] || "");
     return {
       company,
       companyKey: detectCompanyKey(company),
@@ -583,9 +604,10 @@ function parseHeaderParagraph(text) {
   }
 
   // 2-line format: "Cot <num>", elaborador (old Word format) — no company line
-  if (lines.length >= 1 && /^Cot\.?\s+\d{4,}\s*$/.test(lines[0])) {
-    const petMatch = lines[0].match(/^Cot\.?\s+(\d{4,})\s*$/);
-    const elaborador = (lines[1] || "").trim();
+  const line0Stripped = stripPetitionLabel(lines[0] || "");
+  if (lines.length >= 1 && COT_LINE_RE.test(line0Stripped)) {
+    const petMatch = line0Stripped.match(COT_LINE_RE);
+    const elaborador = stripElaboradorLabel(lines[1] || "");
     return {
       company: "",
       companyKey: detectCompanyKey(""),
@@ -595,7 +617,8 @@ function parseHeaderParagraph(text) {
   }
 
   // Single-line: "Cot <num> <name>"
-  const m = norm.match(/^Cot\.?\s+(\d{4,})\s+(.+?)\s*$/);
+  const normStripped = stripPetitionLabel(norm);
+  const m = normStripped.match(/^Cot\.?\s+(\d{4,})\s+(.+?)\s*$/);
   if (m) {
     return {
       company: "",
@@ -606,7 +629,7 @@ function parseHeaderParagraph(text) {
   }
 
   // Just a number
-  const m2 = norm.match(/^Cot\.?\s+(\d{4,})\s*$/);
+  const m2 = normStripped.match(COT_LINE_RE);
   if (m2) {
     return {
       company: "",
@@ -623,7 +646,8 @@ function parseHeaderParagraph(text) {
 // just prose (intro/outro text in the Word) and skip.
 function isLikelyHeaderParagraph(text) {
   if (!text) return false;
-  return /(^|\n)\s*Cot\.?\s+\d{4,}\s*($|\n)/.test(text.replace(/\r/g, ""));
+  const norm = text.replace(/\r/g, "");
+  return norm.split(/\n/).some(l => COT_LINE_RE.test(stripPetitionLabel(l.trim())));
 }
 
 // Real-world Words write company / "Cot <num>" / elaborador as THREE
@@ -632,8 +656,8 @@ function isLikelyHeaderParagraph(text) {
 // nearest previous non-empty paragraph and the elaborador from the nearest
 // next non-empty paragraph, stopping at table boundaries or other headers.
 function resolveHeaderFromNeighborParagraphs(blocks, idx) {
-  const text = (blocks[idx].text || "").trim();
-  const m = text.match(/^Cot\.?\s+(\d{4,})\s*$/);
+  const text = stripPetitionLabel((blocks[idx].text || "").trim());
+  const m = text.match(COT_LINE_RE);
   if (!m) return null;
 
   let company = "";
@@ -641,7 +665,7 @@ function resolveHeaderFromNeighborParagraphs(blocks, idx) {
     if (blocks[j].type !== "p") break; // hit a table — previous petition's area
     const t = (blocks[j].text || "").trim();
     if (!t) continue; // skip blank paragraphs
-    if (!isLikelyHeaderParagraph(t)) company = t;
+    if (!isLikelyHeaderParagraph(t)) company = stripCompanyLabel(t);
     break;
   }
 
@@ -650,7 +674,7 @@ function resolveHeaderFromNeighborParagraphs(blocks, idx) {
     if (blocks[j].type !== "p") break;
     const t = (blocks[j].text || "").trim();
     if (!t) continue;
-    if (!isLikelyHeaderParagraph(t)) elaborador = t;
+    if (!isLikelyHeaderParagraph(t)) elaborador = stripElaboradorLabel(t);
     break;
   }
 
