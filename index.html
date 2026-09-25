@@ -757,6 +757,9 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
+    // Physical zip path ExcelJS writes the "Interna" sheet to — confirmed by
+    // inspecting real output; used for the post-write ignoredErrors patch.
+    sheetFile: "xl/worksheets/sheet1.xml",
     // Parts ExcelJS corrupts when it rewrites the workbook (Table column
     // definitions, and picture position/size/crop for the two logo images)
     // that must be restored verbatim from the original template bytes
@@ -967,6 +970,27 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
     ws.getCell(layout.fechaCell).value = pet.fecha;
   }
 
+  // Nota "<-- FIJAR FECHA" junto a la fecha, para recordarle a Luis fijarla
+  // manualmente (celdas E13:F13 combinadas, borde exterior grueso, fondo gris claro).
+  // ExcelJS unifica el estilo de todas las celdas de un rango combinado al
+  // escribir el archivo (la última que se asigna "gana" para el rango
+  // completo), así que hay que dar el mismo borde en los 4 lados a ambas
+  // celdas — Excel no dibuja la línea interior de una celda combinada.
+  ws.mergeCells("E13:F13");
+  const grayFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+  const thick = { style: "thick", color: { argb: "FF000000" } };
+  const noteBorder = { top: thick, left: thick, bottom: thick, right: thick };
+  const noteAlign = { vertical: "middle", horizontal: "center" };
+  const noteCellE = ws.getCell("E13");
+  noteCellE.value = "<-- FIJAR FECHA";
+  noteCellE.alignment = noteAlign;
+  noteCellE.fill = grayFill;
+  noteCellE.border = noteBorder;
+  const noteCellF = ws.getCell("F13");
+  noteCellF.alignment = noteAlign;
+  noteCellF.fill = grayFill;
+  noteCellF.border = noteBorder;
+
   // Items: la tabla "Partidas" solo tiene (itemsEnd - itemsStart + 1) filas
   // pre-formateadas con fórmulas por referencia estructurada (sin números de
   // fila fijos), así que no hace falta reajustar nada — solo tapamos si hay
@@ -1003,7 +1027,32 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
   // render oversized/overlapping text. Cell DATA writes fine in all cases;
   // only these specific XML parts are broken. Fix: after ExcelJS writes,
   // swap those parts back in from the original (pristine) template bytes.
-  return restoreOriginalTableParts(outBuf, templateBuf, layout.restoreParts);
+  const restoredBuf = await restoreOriginalTableParts(outBuf, templateBuf, layout.restoreParts);
+  // Excel flags cells in the "Partidas" table with a green corner triangle
+  // ("Inconsistent Formula" / "Number Stored as Text" checks) purely as a
+  // UI heuristic — nothing is actually wrong. Tell Excel to ignore those
+  // checks for the item rows so the warnings don't show.
+  const sqref = `B${layout.itemsStart}:P${layout.itemsEnd}`;
+  return suppressErrorChecks(restoredBuf, layout.sheetFile, sqref);
+}
+
+// Insert an <ignoredErrors> element into a worksheet XML part (post-ExcelJS-
+// write string edit, since ExcelJS has no API for this OOXML feature) so
+// Excel's error-checking green triangles don't show on cells whose formulas
+// intentionally vary per row (structured-reference Table formulas) or hold
+// plain numbers Excel's heuristics might flag.
+async function suppressErrorChecks(buf, sheetFile, sqref) {
+  if (!sheetFile) return buf;
+  const zip = await JSZip.loadAsync(buf);
+  const file = zip.file(sheetFile);
+  if (!file) return buf;
+  let xml = await file.async("string");
+  const idx = xml.indexOf("<drawing ");
+  if (idx === -1) return buf;
+  const ignoredErrors = `<ignoredErrors><ignoredError sqref="${sqref}" formula="1" formulaRange="1" numberStoredAsText="1"/></ignoredErrors>`;
+  xml = xml.slice(0, idx) + ignoredErrors + xml.slice(idx);
+  zip.file(sheetFile, xml);
+  return zip.generateAsync({ type: "arraybuffer" });
 }
 
 // Replace one or more zip entries in `outBuf` with their original bytes
