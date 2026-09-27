@@ -782,6 +782,14 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
+    // Cliente sheet's own item rows (formula-driven, pulling from Partidas)
+    // — Excel does NOT auto-grow wrapped-text row heights on file open (only
+    // "Format > AutoFit Row Height", a one-time manual action, does that), so
+    // we compute+set each row's height ourselves at generation time. See
+    // computeClienteRowHeights.
+    clienteSheetName: "Cliente",
+    clienteItemsStart: 15,
+    clienteDescCol: "D",
     // Physical zip path ExcelJS writes the "Interna" sheet to — confirmed by
     // inspecting real output; used for the post-write ignoredErrors patch.
     sheetFile: "xl/worksheets/sheet1.xml",
@@ -809,6 +817,9 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
+    clienteSheetName: "Cliente",
+    clienteItemsStart: 18,
+    clienteDescCol: "C",
     sheetFile: "xl/worksheets/sheet1.xml",
     restoreParts: [
       "xl/tables/table1.xml",
@@ -982,10 +993,59 @@ async function fillLegacyLayout(wb, ws, layout, pet) {
   return wb.xlsx.writeBuffer();
 }
 
+// Excel does NOT auto-grow a wrapped-text cell's row height when a workbook
+// is opened — that only happens once, when a person manually runs
+// Format > "Autoajustar alto de fila" (or double-clicks the row border).
+// Since the Cliente sheet's item rows are entirely formula-driven (no cached
+// <v> for the Descripción formula until Excel recalculates), rows opened
+// fresh just sit at the sheet's flat default height regardless of how many
+// lines the real (recalculated) text needs — verified directly against real
+// Excel (COM automation) rather than assumed: a set of sample descriptions
+// against LUCA's Cliente column (Arial 9pt, width 49.86) sat at a uniform
+// 15pt on open, and only reached their real 15/24pt (1/2 lines) once
+// Format > AutoFit Row Height was run by hand.
+//
+// So we compute each row's needed height ourselves at generation time,
+// using an actual browser <canvas> text measurement (matches real Excel
+// wrapping pixel-for-pixel in that same verification — not a character-count
+// guess) against the column's real width and the cell's real font, both read
+// live from the template rather than hardcoded.
+function computeClienteRowHeights(cliWs, layout, items, preCount) {
+  const descCol = layout.clienteDescCol;
+  const startRow = layout.clienteItemsStart;
+  if (!descCol || !startRow) return;
+
+  const sampleCell = cliWs.getCell(`${descCol}${startRow}`);
+  const font = sampleCell.font || {};
+  const fontSizePt = font.size || 10;
+  const fontName = font.name || "Arial";
+  const indentLevel = (sampleCell.alignment && sampleCell.alignment.indent) || 0;
+  const colWidthUnits = (cliWs.getColumn(descCol).width) || 8.43;
+
+  const canvas = computeClienteRowHeights._canvas || (computeClienteRowHeights._canvas = document.createElement("canvas"));
+  const ctx = canvas.getContext("2d");
+  ctx.font = `${fontSizePt}pt ${fontName}`;
+  let mdw = 0; // max digit width — same metric Excel itself uses to turn a
+  for (let d = 0; d <= 9; d++) mdw = Math.max(mdw, ctx.measureText(String(d)).width); // column's "characters" width into pixels
+  const colPx = Math.floor(((256 * colWidthUnits + Math.floor(128 / mdw)) / 256) * mdw);
+  const usablePx = colPx - indentLevel * mdw - 8; // small buffer for cell padding
+
+  items.slice(0, preCount).forEach((it, idx) => {
+    const r = startRow + idx;
+    const textWidthPx = ctx.measureText(it.desc || "").width;
+    const lines = Math.max(1, Math.ceil(textWidthPx / usablePx));
+    // Calibrated against real Excel: a single line sits at 15pt regardless of
+    // font size (the sheet's own flat default), and each additional wrapped
+    // line adds roughly one font-size's worth of height.
+    cliWs.getRow(r).height = 15 + (lines - 1) * fontSizePt;
+  });
+}
+
 // Table layout (LCRB, "Cotizaciones LCRB.xlsx"): sheet "Interna" with an
 // Excel Table ("Partidas", B15:P35) whose formulas use structured references
 // (no literal row numbers), plus a "Cliente"-facing sheet that pulls
-// everything via formulas — so we only ever touch the "Interna" sheet.
+// everything via formulas — we mostly only touch "Interna", but also set
+// computed row heights on "Cliente" (see computeClienteRowHeights above).
 async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
   // D8 ("Comprador" / "Atención a") = nombre de quien solicita la cotización.
   const compradorCell = ws.getCell(layout.compradorCell);
@@ -1074,6 +1134,9 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
     row.height = undefined;
     if ("_customHeight" in row) row._customHeight = false;
   });
+
+  const cliWs = wb.getWorksheet(layout.clienteSheetName);
+  if (cliWs) computeClienteRowHeights(cliWs, layout, pet.items, preCount);
 
   const outBuf = await wb.xlsx.writeBuffer();
   // ExcelJS 4.4.0 doesn't round-trip Excel Tables correctly: when it
