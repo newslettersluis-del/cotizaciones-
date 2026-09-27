@@ -1032,7 +1032,6 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
   } catch (e) {
     if (!/already merged/i.test(e.message || "")) throw e;
   }
-  const grayFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
   const blueFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFB7DEE8" } };
   const thick = { style: "thick", color: { argb: "FF000000" } };
   const noteBorder = { top: thick, left: thick, bottom: thick, right: thick };
@@ -1040,7 +1039,10 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
   const noteCellE = ws.getCell("E13");
   noteCellE.value = "<-- FIJAR FECHA";
   noteCellE.alignment = noteAlign;
-  noteCellE.fill = grayFill;
+  // Ambas celdas (E y F) en celeste: en una celda combinada, cuál de las dos
+  // "gana" visualmente puede variar según la versión/motor de Excel, así que
+  // en vez de depender de eso ponemos el mismo color en las dos.
+  noteCellE.fill = blueFill;
   noteCellE.border = noteBorder;
   const noteCellF = ws.getCell("F13");
   noteCellF.alignment = noteAlign;
