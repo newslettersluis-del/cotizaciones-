@@ -1215,12 +1215,13 @@ async function fillTableLayout(wb, ws, layout, pet, templateBuf) {
   // only these specific XML parts are broken. Fix: after ExcelJS writes,
   // swap those parts back in from the original (pristine) template bytes.
   const restoredBuf = await restoreOriginalTableParts(outBuf, templateBuf, layout.restoreParts);
+  const dxfFixedBuf = await restoreTableDxfs(restoredBuf, templateBuf, layout.restoreParts);
   // Excel flags cells in the "Partidas" table with a green corner triangle
   // ("Inconsistent Formula" / "Number Stored as Text" checks) purely as a
   // UI heuristic — nothing is actually wrong. Tell Excel to ignore those
   // checks for the item rows so the warnings don't show.
   const sqref = `B${layout.itemsStart}:P${layout.itemsEnd}`;
-  return suppressErrorChecks(restoredBuf, layout.sheetFile, sqref);
+  return suppressErrorChecks(dxfFixedBuf, layout.sheetFile, sqref);
 }
 
 // Insert an <ignoredErrors> element into a worksheet XML part (post-ExcelJS-
@@ -1258,6 +1259,76 @@ async function restoreOriginalTableParts(outBuf, templateBuf, paths) {
       outZip.file(path, await tplFile.async("uint8array"));
     }
   }
+  return outZip.generateAsync({ type: "arraybuffer" });
+}
+
+// table1.xml's headerRowDxfId/dataDxfId attributes (per-column "table style"
+// formatting) point into styles.xml's <dxfs> list using the PRISTINE
+// template's own numbering — but since table1.xml is restored verbatim
+// (see restoreOriginalTableParts above) while styles.xml is whatever
+// ExcelJS wrote, and ExcelJS's write only keeps the <dxf> entries actually
+// referenced by conditionalFormatting rules it understands (trimming the
+// template's original dxfs down and renumbering them), those higher-
+// numbered table dxfs end up pointing past the end of the trimmed list.
+// Excel then shows its "Encontramos un problema con el contenido" repair
+// prompt on open — confirmed directly against a real file Luis sent back:
+// table1.xml referenced dataDxfId up to 18 / headerRowDxfId 19, but the
+// generated styles.xml's <dxfs> only had 3 entries (0-2, matching the
+// conditionalFormatting rules' own dxfId references, which ARE correct and
+// must be left alone). Fix: append the template's own dxf entries for
+// whatever indices are still missing, onto the END of ExcelJS's own
+// (already-correct, lower-numbered) dxfs — never touching indices ExcelJS
+// already wrote, since conditionalFormatting rules in the sheets reference
+// those by number.
+async function restoreTableDxfs(outBuf, templateBuf, restoreParts) {
+  const tablePaths = (restoreParts || []).filter(p => /^xl\/tables\//.test(p));
+  if (!tablePaths.length) return outBuf;
+
+  const [outZip, tplZip] = await Promise.all([
+    JSZip.loadAsync(outBuf),
+    JSZip.loadAsync(templateBuf),
+  ]);
+
+  let maxNeeded = -1;
+  for (const path of tablePaths) {
+    const file = outZip.file(path);
+    if (!file) continue;
+    const xml = await file.async("string");
+    for (const m of xml.matchAll(/(?:headerRowDxfId|dataDxfId)="(\d+)"/g)) {
+      maxNeeded = Math.max(maxNeeded, +m[1]);
+    }
+  }
+  if (maxNeeded < 0) return outBuf; // table doesn't use dxfs at all
+
+  const stylesFile = outZip.file("xl/styles.xml");
+  if (!stylesFile) return outBuf;
+  let outStyles = await stylesFile.async("string");
+  const outMatch = outStyles.match(/<dxfs count="(\d+)">([\s\S]*?)<\/dxfs>/);
+  const outCount = outMatch ? +outMatch[1] : 0;
+  if (maxNeeded < outCount) return outBuf; // nothing dangling, ExcelJS kept enough
+
+  const tplStylesFile = tplZip.file("xl/styles.xml");
+  if (!tplStylesFile) return outBuf;
+  const tplStyles = await tplStylesFile.async("string");
+  const tplMatch = tplStyles.match(/<dxfs count="(\d+)">([\s\S]*?)<\/dxfs>/);
+  if (!tplMatch) return outBuf;
+  const tplEntries = [...tplMatch[2].matchAll(/<dxf\b[^>]*?(?:\/>|>[\s\S]*?<\/dxf>)/g)].map(m => m[0]);
+  if (tplEntries.length <= outCount) return outBuf; // template doesn't have enough either
+
+  const missing = tplEntries.slice(outCount, maxNeeded + 1);
+  if (!missing.length) return outBuf;
+  const newCount = outCount + missing.length;
+  const outEntriesXml = outMatch ? outMatch[2] : "";
+  const newDxfsBlock = `<dxfs count="${newCount}">${outEntriesXml}${missing.join("")}</dxfs>`;
+
+  if (outMatch) {
+    outStyles = outStyles.replace(outMatch[0], () => newDxfsBlock);
+  } else if (outStyles.includes("<tableStyles")) {
+    outStyles = outStyles.replace("<tableStyles", () => newDxfsBlock + "<tableStyles");
+  } else {
+    outStyles = outStyles.replace("</styleSheet>", () => newDxfsBlock + "</styleSheet>");
+  }
+  outZip.file("xl/styles.xml", outStyles);
   return outZip.generateAsync({ type: "arraybuffer" });
 }
 
