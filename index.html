@@ -265,6 +265,36 @@
   }
   summary:hover { color: #2563eb; }
   #fileInput { display: none; }
+  .hist-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+  .hist-company {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .hist-company-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+  .hist-status {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .hist-status.off { background: #f1f5f9; color: #64748b; }
+  .hist-status.on { background: #ecfdf5; color: #047857; }
+  .hist-status.reconnect { background: #fef3c7; color: #92400e; cursor: pointer; }
+  .drop.small { padding: 16px 12px; }
+  .drop.small svg { display: none; }
+  .drop.small small { display: block; color: #475569; }
 </style>
 </head>
 <body>
@@ -304,6 +334,36 @@
   </div>
 
   <div id="results"></div>
+
+  <div class="card" id="historialCard">
+    <h2 style="margin:0 0 4px; font-size:16px; color:#0f172a;">Historial de precios</h2>
+    <p class="muted" style="margin:0 0 16px;">Cuando termines de poner precios en un Excel ya generado, suéltalo aquí — la app guarda esas partidas en un Excel de historial buscable (Ctrl+F) por empresa, para consultar precios cotizados antes.</p>
+    <div class="hist-grid">
+      <div class="hist-company">
+        <div class="hist-company-head">
+          <strong>LCRB</strong>
+          <span class="hist-status off" id="histStatus_LUIS_CARLOS">No vinculado</span>
+        </div>
+        <button class="btn sec" id="histLinkBtn_LUIS_CARLOS" style="margin-bottom:10px; width:100%;">Vincular archivo de historial</button>
+        <div class="drop small" id="histDrop_LUIS_CARLOS">
+          <small class="hist-drop-text"><strong>Arrastra aquí</strong> el Excel ya cotizado de LCRB</small>
+          <input type="file" id="histFileInput_LUIS_CARLOS" accept=".xlsx" class="hidden" />
+        </div>
+      </div>
+      <div class="hist-company">
+        <div class="hist-company-head">
+          <strong>LUCA</strong>
+          <span class="hist-status off" id="histStatus_LUCA">No vinculado</span>
+        </div>
+        <button class="btn sec" id="histLinkBtn_LUCA" style="margin-bottom:10px; width:100%;">Vincular archivo de historial</button>
+        <div class="drop small" id="histDrop_LUCA">
+          <small class="hist-drop-text"><strong>Arrastra aquí</strong> el Excel ya cotizado de LUCA</small>
+          <input type="file" id="histFileInput_LUCA" accept=".xlsx" class="hidden" />
+        </div>
+      </div>
+    </div>
+    <p class="muted" id="histUnsupported" style="display:none; margin:12px 0 0;">Esta función necesita Chrome o Edge (acceso a archivos locales) — no está disponible en este navegador.</p>
+  </div>
 
 </div>
 
@@ -782,6 +842,11 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
+    // Columnas de Interna que la app nunca escribe (Costo unitario / Precio
+    // manual / Precio venta — Luis las llena a mano en Excel después de
+    // descargar), pero sí lee de vuelta cuando sueltas el Excel ya cotizado
+    // en el panel de Historial. Mismas letras en LCRB y LUCA.
+    readCols: { costo: "I", precioManual: "K", precioVenta: "L" },
     // Cliente sheet's own item rows (formula-driven, pulling from Partidas)
     // — Excel does NOT auto-grow wrapped-text row heights on file open (only
     // "Format > AutoFit Row Height", a one-time manual action, does that), so
@@ -817,6 +882,7 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
+    readCols: { costo: "I", precioManual: "K", precioVenta: "L" },
     clienteSheetName: "Cliente",
     clienteItemsStart: 18,
     clienteDescCol: "C",
@@ -1454,6 +1520,249 @@ async function downloadAllZip(petitions) {
   const content = await zip.generateAsync({ type: "blob" });
   saveAs(content, `Cotizaciones ${new Date().toISOString().slice(0,10)}.zip`);
 }
+
+// ============================================================
+// Historial de precios
+// ------------------------------------------------------------
+// La app nunca ve los precios (Costo unitario / Precio manual se llenan a
+// mano en Excel, después de descargar) — así que el único momento real en
+// que puede leer el precio final es si Luis vuelve a soltar ese mismo Excel,
+// ya cotizado, aquí. Cuando lo hace, leemos la hoja "Interna" y agregamos/
+// actualizamos esas partidas en un archivo de historial que vive en su
+// computadora (uno por empresa), usando la File System Access API para
+// poder reabrirlo y reescribirlo sin pedirle que lo suba cada vez.
+//
+// Solo Chrome/Edge soportan showSaveFilePicker — ver initHistorial().
+// ============================================================
+const HIST_COMPANIES = ["LUIS_CARLOS", "LUCA"];
+const HIST_HEADERS = ["Fecha", "Cot No.", "Elaboró", "Cantidad", "Descripción", "UM", "Costo unitario", "Precio venta"];
+const HIST_DB_NAME = "peticiones_historial";
+const HIST_STORE = "handles";
+
+function openHistDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(HIST_DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(HIST_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await openHistDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(HIST_STORE, "readonly").objectStore(HIST_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await openHistDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HIST_STORE, "readwrite");
+    tx.objectStore(HIST_STORE).put(val, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function linkHistorial(companyKey) {
+  const suggestedName = companyKey === "LUCA" ? "historial_LUCA.xlsx" : "historial_LCRB.xlsx";
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName,
+      types: [{
+        description: "Excel",
+        accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] },
+      }],
+    });
+    await idbSet(`historial_${companyKey}`, handle);
+    await refreshHistorialStatus(companyKey);
+  } catch (e) {
+    if (e.name !== "AbortError") alert("No se pudo vincular el archivo: " + e.message);
+  }
+}
+
+// requestPerm=true debe llamarse solo dentro de un gesto del usuario (click)
+// — el navegador rechaza requestPermission() si no viene de una interacción directa.
+async function getHistorialHandle(companyKey, requestPerm) {
+  const handle = await idbGet(`historial_${companyKey}`);
+  if (!handle) return null;
+  const opts = { mode: "readwrite" };
+  let perm = await handle.queryPermission(opts);
+  if (perm !== "granted" && requestPerm) perm = await handle.requestPermission(opts);
+  return perm === "granted" ? handle : null;
+}
+
+async function refreshHistorialStatus(companyKey) {
+  const statusEl = $(`histStatus_${companyKey}`);
+  const handle = await idbGet(`historial_${companyKey}`);
+  if (!handle) {
+    statusEl.textContent = "No vinculado";
+    statusEl.className = "hist-status off";
+    return;
+  }
+  const perm = await handle.queryPermission({ mode: "readwrite" });
+  if (perm === "granted") {
+    statusEl.textContent = `Vinculado: ${handle.name}`;
+    statusEl.className = "hist-status on";
+  } else {
+    statusEl.textContent = `${handle.name} (clic para reconectar)`;
+    statusEl.className = "hist-status reconnect";
+  }
+}
+
+async function loadHistorialWorkbook(handle) {
+  const file = await handle.getFile();
+  const wb = new ExcelJS.Workbook();
+  if (file.size > 0) await wb.xlsx.load(await file.arrayBuffer());
+  return wb;
+}
+
+function readExistingHistorialRows(wb) {
+  const ws = wb.getWorksheet("Historial");
+  if (!ws) return [];
+  const rows = [];
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return; // header
+    rows.push(row.values.slice(1, HIST_HEADERS.length + 1));
+  });
+  return rows;
+}
+
+// Reescribe la hoja "Historial" desde cero (quita la vieja si existe y crea
+// una nueva) en vez de editar filas in-place — ws.spliceRows() en ExcelJS
+// 4.4.0 no borra correctamente las filas de una hoja cargada desde un
+// archivo (a diferencia de una hoja creada en el mismo proceso), lo cual
+// duplicaba partidas en vez de reemplazarlas. Verificado con una prueba
+// directa: con spliceRows, dos llamadas seguidas con el mismo Cot No.
+// dejaban 19 filas (13 viejas + 5 nuevas) en vez de las 5 esperadas;
+// quitar/recrear la hoja da el resultado correcto de forma consistente.
+function writeHistorialSheet(wb, dataRows) {
+  const old = wb.getWorksheet("Historial");
+  if (old) wb.removeWorksheet(old.id);
+  const ws = wb.addWorksheet("Historial", { views: [{ state: "frozen", ySplit: 1 }] });
+  ws.addRow(HIST_HEADERS);
+  ws.getRow(1).font = { bold: true };
+  ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
+  ws.columns = [
+    { width: 12 }, { width: 12 }, { width: 22 }, { width: 10 },
+    { width: 60 }, { width: 8 }, { width: 14 }, { width: 14 },
+  ];
+  ws.autoFilter = "A1:H1";
+  dataRows.forEach(r => ws.addRow(r));
+  return ws;
+}
+
+async function addToHistorial(companyKey, cotNo, entries) {
+  const handle = await getHistorialHandle(companyKey, true);
+  if (!handle) {
+    const label = companyKey === "LUCA" ? "LUCA" : "LCRB";
+    throw new Error(`Vincula primero el archivo de historial de ${label} (botón arriba).`);
+  }
+  const wb = await loadHistorialWorkbook(handle);
+  const existing = readExistingHistorialRows(wb).filter(r => String(r[1]) !== String(cotNo));
+  const newRows = entries.map(e => [e.fecha, e.cotNo, e.comprador, e.cantidad, e.descripcion, e.um, e.costoUnitario, e.precioVenta]);
+  writeHistorialSheet(wb, [...existing, ...newRows]);
+
+  const buf = await wb.xlsx.writeBuffer();
+  const writable = await handle.createWritable();
+  await writable.write(buf);
+  await writable.close();
+}
+
+// Formula cells come back from ExcelJS as {formula, result}; rich text as
+// {richText:[...]}. Todo lo demás (números, texto plano, "NO COTIZA") pasa tal cual.
+function cellPlainValue(cell) {
+  let v = cell.value;
+  if (v && typeof v === "object" && !(v instanceof Date)) {
+    if (v.result !== undefined) v = v.result;
+    else if (v.richText) v = v.richText.map(t => t.text).join("");
+  }
+  return v == null ? "" : v;
+}
+
+async function parseFinishedExcelForHistorial(file, companyKey) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await file.arrayBuffer());
+  const layout = TEMPLATE_LAYOUTS[companyKey];
+  const ws = wb.getWorksheet(layout.sheetName);
+  if (!ws) throw new Error(`No encontré la hoja "${layout.sheetName}" en este archivo — ¿es un Excel generado por esta app?`);
+
+  const cotNo = cellPlainValue(ws.getCell(layout.folioCell));
+  const comprador = String(cellPlainValue(ws.getCell(layout.compradorCell)) || "");
+  const fecha = new Date(); // fecha en que se guarda al historial, no la de la cotización
+
+  const cols = layout.readCols;
+  const entries = [];
+  for (let r = layout.itemsStart; r <= layout.itemsEnd; r++) {
+    const desc = cellPlainValue(ws.getCell(`${layout.itemCols.desc}${r}`));
+    if (!desc) continue; // fila sin sembrar
+    const cant = cellPlainValue(ws.getCell(`${layout.itemCols.cant}${r}`));
+    const um = cellPlainValue(ws.getCell(`${layout.itemCols.um}${r}`));
+    const costo = cellPlainValue(ws.getCell(`${cols.costo}${r}`));
+    const precioVenta = cellPlainValue(ws.getCell(`${cols.precioVenta}${r}`));
+    entries.push({ fecha, cotNo, comprador, cantidad: cant, descripcion: desc, um, costoUnitario: costo, precioVenta });
+  }
+  return { cotNo, entries };
+}
+
+async function handleHistorialDrop(companyKey, file) {
+  const textEl = $(`histDrop_${companyKey}`).querySelector(".hist-drop-text");
+  const original = textEl.innerHTML;
+  textEl.textContent = "Leyendo...";
+  try {
+    const { cotNo, entries } = await parseFinishedExcelForHistorial(file, companyKey);
+    if (!entries.length) throw new Error("No encontré partidas con descripción en la hoja Interna.");
+    await addToHistorial(companyKey, cotNo, entries);
+    textEl.textContent = `✓ ${entries.length} partida(s) de Cot ${cotNo} guardadas en el historial.`;
+    setTimeout(() => { textEl.innerHTML = original; }, 5000);
+  } catch (err) {
+    alert("Error al actualizar historial: " + err.message);
+    textEl.innerHTML = original;
+  }
+}
+
+function initHistorial() {
+  if (!window.showSaveFilePicker) {
+    $("histUnsupported").style.display = "block";
+    HIST_COMPANIES.forEach(ck => {
+      $(`histLinkBtn_${ck}`).disabled = true;
+      const dz = $(`histDrop_${ck}`);
+      dz.style.opacity = "0.5";
+      dz.style.pointerEvents = "none";
+    });
+    return;
+  }
+  HIST_COMPANIES.forEach(ck => {
+    refreshHistorialStatus(ck);
+    $(`histLinkBtn_${ck}`).addEventListener("click", () => linkHistorial(ck));
+
+    const statusEl = $(`histStatus_${ck}`);
+    statusEl.addEventListener("click", async () => {
+      if (!statusEl.classList.contains("reconnect")) return;
+      await getHistorialHandle(ck, true);
+      refreshHistorialStatus(ck);
+    });
+
+    const dz = $(`histDrop_${ck}`);
+    const fi = $(`histFileInput_${ck}`);
+    dz.addEventListener("click", () => fi.click());
+    fi.addEventListener("change", () => {
+      if (fi.files[0]) handleHistorialDrop(ck, fi.files[0]);
+      fi.value = "";
+    });
+    dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("drag"); });
+    dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+    dz.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dz.classList.remove("drag");
+      const f = e.dataTransfer.files[0];
+      if (f) handleHistorialDrop(ck, f);
+    });
+  });
+}
+
+initHistorial();
 </script>
 </body>
 </html>
