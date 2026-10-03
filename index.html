@@ -860,7 +860,7 @@ const TEMPLATE_LAYOUTS = {
     // manual / Precio venta — Luis las llena a mano en Excel después de
     // descargar), pero sí lee de vuelta cuando sueltas el Excel ya cotizado
     // en el panel de Historial. Mismas letras en LCRB y LUCA.
-    readCols: { costo: "I", precioManual: "K", precioVenta: "L", proveedor: "F", contacto: "G" },
+    readCols: { costo: "I", precioManual: "K", precioVenta: "L", contacto: "G", web: "H" },
     // Cliente sheet's own item rows (formula-driven, pulling from Partidas)
     // — Excel does NOT auto-grow wrapped-text row heights on file open (only
     // "Format > AutoFit Row Height", a one-time manual action, does that), so
@@ -903,7 +903,7 @@ const TEMPLATE_LAYOUTS = {
     itemsStart: 16,
     itemsEnd: 35,
     itemCols: { cant: "C", desc: "D", um: "E" },
-    readCols: { costo: "I", precioManual: "K", precioVenta: "L", proveedor: "F", contacto: "G" },
+    readCols: { costo: "I", precioManual: "K", precioVenta: "L", contacto: "G", web: "H" },
     clienteSheetName: "Cliente",
     clienteItemsStart: 18,
     clienteItemsEnd: 42,
@@ -1745,7 +1745,7 @@ async function downloadAllZip(petitions) {
 // Solo Chrome/Edge soportan showSaveFilePicker — ver initHistorial().
 // ============================================================
 const HIST_COMPANIES = ["LUIS_CARLOS", "LUCA"];
-const HIST_HEADERS = ["Fecha", "Cot No.", "Elaboró", "Cantidad", "Descripción", "UM", "Costo unitario", "Precio venta", "Dónde comprar"];
+const HIST_HEADERS = ["Fecha", "Cot No.", "Elaboró", "Cantidad", "Descripción", "UM", "Costo unitario", "Precio venta", "Contacto proveedor", "Web"];
 const HIST_DB_NAME = "peticiones_historial";
 const HIST_STORE = "handles";
 
@@ -1856,9 +1856,9 @@ function writeHistorialSheet(wb, dataRows) {
   ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
   ws.columns = [
     { width: 12 }, { width: 12 }, { width: 22 }, { width: 10 },
-    { width: 60 }, { width: 8 }, { width: 14 }, { width: 14 }, { width: 30 },
+    { width: 60 }, { width: 8 }, { width: 14 }, { width: 14 }, { width: 22 }, { width: 30 },
   ];
-  ws.autoFilter = "A1:I1";
+  ws.autoFilter = "A1:J1";
   dataRows.forEach(r => ws.addRow(r));
   return ws;
 }
@@ -1871,7 +1871,7 @@ async function addToHistorial(companyKey, cotNo, entries) {
   }
   const wb = await loadHistorialWorkbook(handle);
   const existing = readExistingHistorialRows(wb).filter(r => String(r[1]) !== String(cotNo));
-  const newRows = entries.map(e => [e.fecha, e.cotNo, e.comprador, e.cantidad, e.descripcion, e.um, e.costoUnitario, e.precioVenta, e.dondeComprar]);
+  const newRows = entries.map(e => [e.fecha, e.cotNo, e.comprador, e.cantidad, e.descripcion, e.um, e.costoUnitario, e.precioVenta, e.contacto, e.web]);
   writeHistorialSheet(wb, [...existing, ...newRows]);
 
   const buf = await wb.xlsx.writeBuffer();
@@ -1912,9 +1912,9 @@ async function parseFinishedExcelForHistorial(file, companyKey) {
     const um = cellPlainValue(ws.getCell(`${layout.itemCols.um}${r}`));
     const costo = cellPlainValue(ws.getCell(`${cols.costo}${r}`));
     const precioVenta = cellPlainValue(ws.getCell(`${cols.precioVenta}${r}`));
-    const dondeComprar = [cellPlainValue(ws.getCell(`${cols.proveedor}${r}`)), cellPlainValue(ws.getCell(`${cols.contacto}${r}`))]
-      .map(v => String(v).trim()).filter(Boolean).join(" / ");
-    entries.push({ fecha, cotNo, comprador, cantidad: cant, descripcion: desc, um, costoUnitario: costo, precioVenta, dondeComprar });
+    const contacto = String(cellPlainValue(ws.getCell(`${cols.contacto}${r}`)) || "").trim();
+    const web = String(cellPlainValue(ws.getCell(`${cols.web}${r}`)) || "").trim();
+    entries.push({ fecha, cotNo, comprador, cantidad: cant, descripcion: desc, um, costoUnitario: costo, precioVenta, contacto, web });
   }
   return { cotNo, entries };
 }
