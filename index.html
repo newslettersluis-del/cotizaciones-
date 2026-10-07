@@ -1745,9 +1745,22 @@ async function downloadAllZip(petitions) {
 // Solo Chrome/Edge soportan showOpenFilePicker — ver initHistorial().
 // ============================================================
 const HIST_COMPANIES = ["LUIS_CARLOS", "LUCA"];
-const HIST_HEADERS = ["Fecha", "Cot No.", "Elaboró", "Cantidad", "Descripción", "UM", "Costo unitario", "Precio venta", "Contacto proveedor", "Web"];
+// "Historial": lista de precios, un renglón por producto (clave = descripción
+// normalizada + UM) con su precio MÁS RECIENTE — nunca se duplica un
+// producto; al soltar una cotización con un producto que ya está, se
+// sobrescribe su precio/fecha/cotización/contacto/web.
+const HIST_HEADERS = ["Producto", "UM", "Precio", "Fecha", "Cot No.", "Contacto proveedor", "Web"];
+// "Precios": el registro completo, una fila por cada partida de cada
+// cotización que se suelta — aquí sí se conserva todo el detalle histórico,
+// nunca se borra ni se sobrescribe, solo se agrega.
+const PRECIOS_HEADERS = ["Año", "Fecha", "Cot No.", "Producto", "UM", "Precio"];
 const HIST_DB_NAME = "peticiones_historial";
 const HIST_STORE = "handles";
+
+function normProductKey(desc, um) {
+  const n = s => String(s || "").replace(/\s+/g, " ").trim().toUpperCase();
+  return n(desc) + " | " + n(um);
+}
 
 function openHistDB() {
   return new Promise((resolve, reject) => {
@@ -1840,41 +1853,43 @@ async function loadHistorialWorkbook(handle) {
   return wb;
 }
 
-function readExistingHistorialRows(wb) {
-  const ws = wb.getWorksheet("Historial");
+// Lee una hoja genérica (header en la fila 1) a un arreglo de arreglos.
+function readSheetRows(wb, sheetName, headerLen) {
+  const ws = wb.getWorksheet(sheetName);
   if (!ws) return [];
   const rows = [];
   ws.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return; // header
-    rows.push(row.values.slice(1, HIST_HEADERS.length + 1));
+    rows.push(row.values.slice(1, headerLen + 1));
   });
   return rows;
 }
 
-// Reescribe la hoja "Historial" desde cero (quita la vieja si existe y crea
-// una nueva) en vez de editar filas in-place — ws.spliceRows() en ExcelJS
-// 4.4.0 no borra correctamente las filas de una hoja cargada desde un
-// archivo (a diferencia de una hoja creada en el mismo proceso), lo cual
-// duplicaba partidas en vez de reemplazarlas. Verificado con una prueba
-// directa: con spliceRows, dos llamadas seguidas con el mismo Cot No.
-// dejaban 19 filas (13 viejas + 5 nuevas) en vez de las 5 esperadas;
-// quitar/recrear la hoja da el resultado correcto de forma consistente.
-function writeHistorialSheet(wb, dataRows) {
-  const old = wb.getWorksheet("Historial");
+// Reescribe una hoja desde cero (quita la vieja si existe y crea una nueva)
+// en vez de editar filas in-place — ws.spliceRows() en ExcelJS 4.4.0 no
+// borra correctamente las filas de una hoja cargada desde un archivo (a
+// diferencia de una creada en el mismo proceso), lo cual duplicaba filas en
+// vez de reemplazarlas. Verificado con una prueba directa. Quitar/recrear
+// da el resultado correcto de forma consistente.
+function rewriteSheet(wb, sheetName, headers, dataRows, colWidths) {
+  const old = wb.getWorksheet(sheetName);
   if (old) wb.removeWorksheet(old.id);
-  const ws = wb.addWorksheet("Historial", { views: [{ state: "frozen", ySplit: 1 }] });
-  ws.addRow(HIST_HEADERS);
+  const ws = wb.addWorksheet(sheetName, { views: [{ state: "frozen", ySplit: 1 }] });
+  ws.addRow(headers);
   ws.getRow(1).font = { bold: true };
   ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
-  ws.columns = [
-    { width: 12 }, { width: 12 }, { width: 22 }, { width: 10 },
-    { width: 60 }, { width: 8 }, { width: 14 }, { width: 14 }, { width: 22 }, { width: 30 },
-  ];
-  ws.autoFilter = "A1:J1";
+  ws.columns = colWidths.map(width => ({ width }));
+  ws.autoFilter = { from: "A1", to: { row: 1, column: headers.length } };
   dataRows.forEach(r => ws.addRow(r));
   return ws;
 }
 
+// Agrega las partidas de esta cotización a "Precios" (nunca se quita nada,
+// solo se agrega — es el registro histórico completo) y actualiza
+// "Historial" (un renglón por producto, con su precio más reciente,
+// sobrescribiendo si el producto ya estaba). Las partidas sin precio
+// numérico (en blanco o "NO COTIZA") no se registran en ninguna de las dos,
+// porque no hay un precio real que guardar.
 async function addToHistorial(companyKey, cotNo, entries) {
   const handle = await getHistorialHandle(companyKey, true);
   if (!handle) {
@@ -1882,9 +1897,28 @@ async function addToHistorial(companyKey, cotNo, entries) {
     throw new Error(`Vincula primero el archivo de historial de ${label} (botón arriba).`);
   }
   const wb = await loadHistorialWorkbook(handle);
-  const existing = readExistingHistorialRows(wb).filter(r => String(r[1]) !== String(cotNo));
-  const newRows = entries.map(e => [e.fecha, e.cotNo, e.comprador, e.cantidad, e.descripcion, e.um, e.costoUnitario, e.precioVenta, e.contacto, e.web]);
-  writeHistorialSheet(wb, [...existing, ...newRows]);
+
+  const priced = entries.filter(e => typeof e.precioVenta === "number" && !isNaN(e.precioVenta));
+
+  const existingPrecios = readSheetRows(wb, "Precios", PRECIOS_HEADERS.length);
+  const newPrecios = priced.map(e => [e.fecha.getFullYear(), e.fecha, e.cotNo, e.descripcion, e.um, e.precioVenta]);
+  rewriteSheet(wb, "Precios", PRECIOS_HEADERS, [...existingPrecios, ...newPrecios],
+    [8, 12, 14, 70, 8, 14]);
+
+  const existingHist = readSheetRows(wb, "Historial", HIST_HEADERS.length);
+  const productMap = new Map();
+  for (const r of existingHist) productMap.set(normProductKey(r[0], r[1]), r);
+  for (const e of priced) {
+    const key = normProductKey(e.descripcion, e.um);
+    const prev = productMap.get(key);
+    productMap.set(key, [
+      e.descripcion, e.um, e.precioVenta, e.fecha, e.cotNo,
+      e.contacto || (prev ? prev[5] : "") || "",
+      e.web || (prev ? prev[6] : "") || "",
+    ]);
+  }
+  rewriteSheet(wb, "Historial", HIST_HEADERS, [...productMap.values()],
+    [70, 8, 14, 12, 14, 22, 30]);
 
   const buf = await wb.xlsx.writeBuffer();
   const writable = await handle.createWritable();
