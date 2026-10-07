@@ -1742,7 +1742,7 @@ async function downloadAllZip(petitions) {
 // computadora (uno por empresa), usando la File System Access API para
 // poder reabrirlo y reescribirlo sin pedirle que lo suba cada vez.
 //
-// Solo Chrome/Edge soportan showSaveFilePicker — ver initHistorial().
+// Solo Chrome/Edge soportan showOpenFilePicker — ver initHistorial().
 // ============================================================
 const HIST_COMPANIES = ["LUIS_CARLOS", "LUCA"];
 const HIST_HEADERS = ["Fecha", "Cot No.", "Elaboró", "Cantidad", "Descripción", "UM", "Costo unitario", "Precio venta", "Contacto proveedor", "Web"];
@@ -1775,16 +1775,28 @@ async function idbSet(key, val) {
   });
 }
 
+// Usa el picker de "Abrir" (showOpenFilePicker), no el de "Guardar como"
+// (showSaveFilePicker) — este último es para elegir dónde guardar contenido
+// NUEVO, y algunos navegadores vacían el archivo elegido en cuanto se
+// confirma, incluso antes de escribir nada. Eso borró el historial de un
+// usuario real al re-vincular un archivo que ya tenía datos. "Abrir" nunca
+// toca el contenido; solo entrega un handle para leer/escribir después.
+// Esto significa que vincular requiere que el archivo YA exista — para
+// crear uno nuevo, hay que crear primero un .xlsx vacío fuera de la app
+// (por ejemplo copiando uno existente y borrando su contenido) y luego
+// vincularlo aquí.
 async function linkHistorial(companyKey) {
-  const suggestedName = companyKey === "LUCA" ? "historial_LUCA.xlsx" : "historial_LCRB.xlsx";
   try {
-    const handle = await window.showSaveFilePicker({
-      suggestedName,
+    const [handle] = await window.showOpenFilePicker({
+      id: `historial-${companyKey}`,
       types: [{
         description: "Excel",
         accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] },
       }],
     });
+    // Pedimos permiso de escritura ya, dentro del mismo click — el navegador
+    // rechaza requestPermission() si no viene de una interacción directa.
+    await handle.requestPermission({ mode: "readwrite" });
     await idbSet(`historial_${companyKey}`, handle);
     await refreshHistorialStatus(companyKey);
   } catch (e) {
@@ -1936,7 +1948,7 @@ async function handleHistorialDrop(companyKey, file) {
 }
 
 function initHistorial() {
-  if (!window.showSaveFilePicker) {
+  if (!window.showOpenFilePicker) {
     $("histUnsupported").style.display = "block";
     HIST_COMPANIES.forEach(ck => {
       $(`histLinkBtn_${ck}`).disabled = true;
