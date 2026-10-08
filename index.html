@@ -1749,7 +1749,7 @@ const HIST_COMPANIES = ["LUIS_CARLOS", "LUCA"];
 // normalizada + UM) con su precio MÁS RECIENTE — nunca se duplica un
 // producto; al soltar una cotización con un producto que ya está, se
 // sobrescribe su precio/fecha/cotización/contacto/web.
-const HIST_HEADERS = ["Producto", "UM", "Precio", "Fecha", "Cot No.", "Contacto proveedor", "Web"];
+const HIST_HEADERS = ["Producto", "UM", "Costo unitario", "Precio venta", "Fecha", "Cot No.", "Contacto proveedor", "Web"];
 // "Precios": el registro completo, una fila por cada partida de cada
 // cotización que se suelta — aquí sí se conserva todo el detalle histórico,
 // nunca se borra ni se sobrescribe, solo se agrega.
@@ -1928,15 +1928,17 @@ async function addToHistorial(companyKey, cotNo, entries) {
   for (const e of priced) {
     const key = normProductKey(e.descripcion, e.um);
     const prev = productMap.get(key);
+    const costo = typeof e.costoUnitario === "number" && !isNaN(e.costoUnitario)
+      ? e.costoUnitario : (prev ? prev[2] : "") || "";
     productMap.set(key, [
-      e.descripcion, e.um, e.precioVenta, e.fecha, e.cotNo,
-      e.contacto || (prev ? prev[5] : "") || "",
-      e.web || (prev ? prev[6] : "") || "",
+      e.descripcion, e.um, costo, e.precioVenta, e.fecha, e.cotNo,
+      e.contacto || (prev ? prev[6] : "") || "",
+      e.web || (prev ? prev[7] : "") || "",
     ]);
   }
   const historialRows = [...productMap.values()].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
   rewriteSheet(wb, "Historial", HIST_HEADERS, historialRows,
-    [70, 8, 14, 12, 14, 22, 30]);
+    [70, 8, 14, 14, 12, 14, 22, 30]);
 
   const buf = await wb.xlsx.writeBuffer();
   const writable = await handle.createWritable();
