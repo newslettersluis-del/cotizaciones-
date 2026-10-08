@@ -1934,7 +1934,8 @@ async function addToHistorial(companyKey, cotNo, entries) {
       e.web || (prev ? prev[6] : "") || "",
     ]);
   }
-  rewriteSheet(wb, "Historial", HIST_HEADERS, [...productMap.values()],
+  const historialRows = [...productMap.values()].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  rewriteSheet(wb, "Historial", HIST_HEADERS, historialRows,
     [70, 8, 14, 12, 14, 22, 30]);
 
   const buf = await wb.xlsx.writeBuffer();
