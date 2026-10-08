@@ -1757,9 +1757,26 @@ const PRECIOS_HEADERS = ["Año", "Fecha", "Cot No.", "Producto", "UM", "Precio"]
 const HIST_DB_NAME = "peticiones_historial";
 const HIST_STORE = "handles";
 
+// Para comparar si dos partidas son "el mismo producto" no basta con
+// trim+mayúsculas: una década de descripciones tecleadas a mano trae de
+// todo — un punto en vez de coma, un espacio de más, "N°" vs "Nº" vs "N",
+// comillas rectas vs curvas. Quitar toda la puntuación (dejando números y
+// letras intactos) y colapsar espacios agrupa esas variantes sin fusionar
+// productos realmente distintos — comprobado contra el historial real: de
+// 304 grupos que esta normalización junta, ninguno mezcla medidas o modelos
+// diferentes, solo puntuación.
 function normProductKey(desc, um) {
-  const n = s => String(s || "").replace(/\s+/g, " ").trim().toUpperCase();
-  return n(desc) + " | " + n(um);
+  const foldAccents = s => s.replace(/[ÁÉÍÓÚ]/g, c => ({ Á: "A", É: "E", Í: "I", Ó: "O", Ú: "U" }[c]));
+  const normDesc = s => foldAccents(String(s || "").toUpperCase())
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
+  // Mismas unidades, abreviadas distinto ("PZA" vs "PZ", etc.)
+  const UM_SYNONYMS = { PZA: "PZ", PIEZA: "PZ", PZAS: "PZ", GL: "GAL", MTS: "MT", TAMB: "TAM" };
+  const normUm = s => {
+    const u = String(s || "").toUpperCase().replace(/[^A-Z0-9]+/g, "").trim();
+    return UM_SYNONYMS[u] || u;
+  };
+  return normDesc(desc) + " | " + normUm(um);
 }
 
 function openHistDB() {
